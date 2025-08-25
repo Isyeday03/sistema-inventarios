@@ -1,160 +1,230 @@
-from producto import Producto
+# python
+from __future__ import annotations
+
+import json
+import os
+import shutil
+from typing import Any, Dict, List, Optional
 
 
 class Inventario:
     """
-    Clase que gestiona el inventario de productos de una tienda.
-
-    Atributos:
-        productos (list): Lista de productos en el inventario
+    Inventario con persistencia JSON y operaciones básicas.
+    - Almacena internamente como dict[codigo] = {nombre, precio, cantidad}
+    - Guarda en disco como lista de objetos [{"codigo", "nombre", "precio", "cantidad"}, ...]
+    - Nunca lanza excepciones hacia el exterior en operaciones públicas; devuelve bool/None.
     """
 
-    def __init__(self):
-        """Constructor de la clase Inventario. Inicializa lista vacía de productos."""
-        self.__productos = []
+    def __init__(self, ruta: str = "inventario.txt") -> None:
+        self.ruta: str = ruta
+        self.productos: Dict[str, Dict[str, Any]] = {}
+        self.cargar()
 
-    def __buscar_producto_por_id(self, id):
-        """
-        Método privado para buscar un producto por su ID.
+    # ===================== Utilidades internas =====================
 
-        Args:
-            id (int): ID del producto a buscar
-
-        Returns:
-            Producto or None: El producto si se encuentra, None en caso contrario
-        """
-        for producto in self.__productos:
-            if producto.get_id() == id:
-                return producto
-        return None
-
-    def agregar_producto(self, producto):
-        """
-        Añade un nuevo producto al inventario.
-
-        Args:
-            producto (Producto): Producto a añadir
-
-        Returns:
-            bool: True si se añadió correctamente, False si ya existe el ID
-        """
-        # Verificar que el ID sea único
-        if self.__buscar_producto_por_id(producto.get_id()) is not None:
-            return False  # ID ya existe
-
-        self.__productos.append(producto)
-        return True
-
-    def eliminar_producto(self, id):
-        """
-        Elimina un producto del inventario por su ID.
-
-        Args:
-            id (int): ID del producto a eliminar
-
-        Returns:
-            bool: True si se eliminó correctamente, False si no se encontró
-        """
-        producto = self.__buscar_producto_por_id(id)
-        if producto:
-            self.__productos.remove(producto)
+    def _crear_archivo_vacio(self) -> bool:
+        try:
+            data: List[Dict[str, Any]] = []
+            with open(self.ruta, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
             return True
-        return False
+        except OSError:
+            return False
 
-    def actualizar_cantidad(self, id, nueva_cantidad):
-        """
-        Actualiza la cantidad de un producto.
+    def _normalizar_producto(self, item: Dict[str, Any], codigo: str) -> Dict[str, Any]:
+        nombre = str(item.get("nombre") or "").strip()
+        try:
+            precio = float(item.get("precio", 0.0))
+        except (ValueError, TypeError):
+            precio = 0.0
+        try:
+            cantidad = int(item.get("cantidad", 0))
+        except (ValueError, TypeError):
+            cantidad = 0
 
-        Args:
-            id (int): ID del producto a actualizar
-            nueva_cantidad (int): Nueva cantidad del producto
+        if precio < 0:
+            precio = 0.0
+        if cantidad < 0:
+            cantidad = 0
 
-        Returns:
-            bool: True si se actualizó correctamente, False si no se encontró
-        """
-        producto = self.__buscar_producto_por_id(id)
-        if producto:
-            try:
-                producto.set_cantidad(nueva_cantidad)
-                return True
-            except ValueError:
+        return {
+            "nombre": nombre,
+            "precio": precio,
+            "cantidad": cantidad,
+        }
+
+    def _producto_completo(self, codigo: str, base: Dict[str, Any]) -> Dict[str, Any]:
+        # Construye un dict con todos los campos para guardado/listado
+        return {
+            "codigo": codigo,
+            "nombre": str(base.get("nombre", "")).strip(),
+            "precio": float(base.get("precio", 0.0)),
+            "cantidad": int(base.get("cantidad", 0)),
+        }
+
+    def _copiar_como_corrupto(self) -> None:
+        try:
+            destino = f"{self.ruta}.corrupto"
+            shutil.copyfile(self.ruta, destino)
+        except OSError:
+            # Silencioso: si no puede copiar, continuamos con reset
+            pass
+
+    # ===================== Persistencia =====================
+
+    def cargar(self) -> bool:
+        if not os.path.exists(self.ruta):
+            self.productos = {}
+            self._crear_archivo_vacio()
+            return True
+
+        try:
+            with open(self.ruta, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            productos: Dict[str, Dict[str, Any]] = {}
+            if isinstance(data, list):
+                for it in data:
+                    if not isinstance(it, dict):
+                        continue
+                    codigo = str(it.get("codigo", "")).strip()
+                    if not codigo:
+                        continue
+                    productos[codigo] = self._normalizar_producto(it, codigo)
+            elif isinstance(data, dict):
+                # También soporta formato dict {codigo: {...}}
+                for k, v in data.items():
+                    codigo = str(k).strip()
+                    if not codigo or not isinstance(v, dict):
+                        continue
+                    productos[codigo] = self._normalizar_producto(v, codigo)
+            else:
+                # Formato desconocido => tratar como corrupto
+                self._copiar_como_corrupto()
+                self.productos = {}
+                self._crear_archivo_vacio()
                 return False
-        return False
 
-    def actualizar_precio(self, id, nuevo_precio):
+            self.productos = productos
+            return True
+
+        except (json.JSONDecodeError, ValueError, TypeError) as e:
+            # Archivo corrupto => crear copia y reiniciar
+            self._copiar_como_corrupto()
+            self.productos = {}
+            self._crear_archivo_vacio()
+            return False
+        except (FileNotFoundError, PermissionError, OSError):
+            # Cualquier otro problema => intentar crear vacío
+            self.productos = {}
+            self._crear_archivo_vacio()
+            return False
+
+    def guardar(self) -> bool:
+        try:
+            data: List[Dict[str, Any]] = [
+                self._producto_completo(codigo, prod)
+                for codigo, prod in sorted(self.productos.items(), key=lambda x: x[0])
+            ]
+            with open(self.ruta, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            return True
+        except (PermissionError, OSError, TypeError, ValueError):
+            return False
+
+    # ===================== Operaciones públicas =====================
+
+    def anadir(self, codigo: str, nombre: str, precio: float, cantidad: int) -> bool:
+        codigo = str(codigo).strip()
+        if not codigo:
+            return False
+        nombre = str(nombre).strip()
+        try:
+            precio = float(precio)
+            cantidad = int(cantidad)
+        except (ValueError, TypeError):
+            return False
+        if precio < 0 or cantidad < 0:
+            return False
+        if codigo in self.productos:
+            return False
+
+        self.productos[codigo] = {"nombre": nombre, "precio": precio, "cantidad": cantidad}
+        return self.guardar()
+
+    def eliminar(self, codigo: str) -> bool:
         """
-        Actualiza el precio de un producto.
-
-        Args:
-            id (int): ID del producto a actualizar
-            nuevo_precio (float): Nuevo precio del producto
-
-        Returns:
-            bool: True si se actualizó correctamente, False si no se encontró
+        Elimina el producto por código. Devuelve True si elimina algo, False si no existe o falla el guardado.
+        No lanza excepciones.
         """
-        producto = self.__buscar_producto_por_id(id)
-        if producto:
+        codigo = str(codigo).strip()
+        if not codigo or codigo not in self.productos:
+            return False
+        del self.productos[codigo]
+        return self.guardar()
+
+    def actualizar(
+        self,
+        codigo: str,
+        nombre: Optional[str] = None,
+        precio: Optional[float] = None,
+        cantidad: Optional[int] = None,
+    ) -> bool:
+        """
+        Actualiza campos del producto. Solo cambia los argumentos no None.
+        Devuelve True si se actualiza y guarda correctamente.
+        """
+        codigo = str(codigo).strip()
+        if not codigo or codigo not in self.productos:
+            return False
+
+        prod = self.productos[codigo].copy()
+
+        if nombre is not None:
+            prod["nombre"] = str(nombre).strip()
+        if precio is not None:
             try:
-                producto.set_precio(nuevo_precio)
-                return True
-            except ValueError:
+                p = float(precio)
+            except (ValueError, TypeError):
                 return False
-        return False
+            if p < 0:
+                return False
+            prod["precio"] = p
+        if cantidad is not None:
+            try:
+                c = int(cantidad)
+            except (ValueError, TypeError):
+                return False
+            if c < 0:
+                return False
+            prod["cantidad"] = c
 
-    def buscar_productos_por_nombre(self, nombre):
+        # Normaliza para asegurar atributos completos
+        prod = self._normalizar_producto(prod, codigo)
+        self.productos[codigo] = prod
+        return self.guardar()
+
+    def obtener(self, codigo: str) -> Optional[Dict[str, Any]]:
         """
-        Busca productos por nombre (búsqueda parcial, no case-sensitive).
-
-        Args:
-            nombre (str): Nombre o parte del nombre a buscar
-
-        Returns:
-            list: Lista de productos que coinciden con el nombre
+        Obtiene un producto completo con todos los campos, o None si no existe.
         """
-        productos_encontrados = []
-        nombre_lower = nombre.lower()
+        codigo = str(codigo).strip()
+        if not codigo or codigo not in self.productos:
+            return None
+        base = self.productos[codigo]
+        return self._producto_completo(codigo, base)
 
-        for producto in self.__productos:
-            if nombre_lower in producto.get_nombre().lower():
-                productos_encontrados.append(producto)
-
-        return productos_encontrados
-
-    def obtener_producto_por_id(self, id):
+    def listar(self) -> List[Dict[str, Any]]:
         """
-        Obtiene un producto específico por su ID.
-
-        Args:
-            id (int): ID del producto a buscar
-
-        Returns:
-            Producto or None: El producto si se encuentra, None en caso contrario
+        Lista todos los productos con todos los campos.
         """
-        return self.__buscar_producto_por_id(id)
+        return [
+            self._producto_completo(codigo, prod)
+            for codigo, prod in sorted(self.productos.items(), key=lambda x: x[0])
+        ]
 
-    def mostrar_todos_los_productos(self):
-        """
-        Retorna todos los productos del inventario.
+    def existe(self, codigo: str) -> bool:
+        return str(codigo).strip() in self.productos
 
-        Returns:
-            list: Lista de todos los productos en el inventario
-        """
-        return self.__productos.copy()  # Retorna una copia para evitar modificaciones externas
-
-    def obtener_cantidad_productos(self):
-        """
-        Retorna el número total de productos diferentes en el inventario.
-
-        Returns:
-            int: Número de productos en el inventario
-        """
-        return len(self.__productos)
-
-    def esta_vacio(self):
-        """
-        Verifica si el inventario está vacío.
-
-        Returns:
-            bool: True si está vacío, False en caso contrario
-        """
-        return len(self.__productos) == 0
+    def valor_total(self) -> float:
+        return float(sum(p["precio"] * p["cantidad"] for p in self.productos.values()))
